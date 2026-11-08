@@ -1,215 +1,182 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+from datetime import datetime
 
-# ==========================================
-# 1. KHỞI TẠO CƠ SỞ DỮ LIỆU (Chạy lần đầu sẽ tự tạo file db)
-# ==========================================
+# 1. KẾT NỐI VÀ KHỞI TẠO CƠ SỞ DỮ LIỆU SQLITE
+conn = sqlite3.connect('electronics_store.db', check_same_thread=False)
+c = conn.cursor()
+
 def init_db():
-    conn = sqlite3.connect('electronics_store.db')
-    c = conn.cursor()
-    # Tạo bảng Sản phẩm (Mô phỏng DB đồ điện tử)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            imei TEXT UNIQUE NOT NULL,
-            price REAL NOT NULL,
-            status TEXT NOT NULL
-        )
-    ''')
+    # Bảng Người dùng (Phân quyền)
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
+    # Bảng Sản phẩm
+    c.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, imei TEXT UNIQUE, price REAL, status TEXT)''')
+    # Bảng Khách hàng
+    c.execute('''CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT UNIQUE)''')
+    # Bảng Đơn hàng (POS)
+    c.execute('''CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, imei TEXT, sale_date TEXT, total REAL)''')
     conn.commit()
-    conn.close()
 
-# Hàm hỗ trợ chạy lệnh SQL
-def run_query(query, params=()):
-    conn = sqlite3.connect('electronics_store.db')
-    c = conn.cursor()
-    c.execute(query, params)
-    conn.commit()
-    data = c.fetchall()
-    conn.close()
-    return data
+    # Tạo sẵn tài khoản mẫu để test
+    c.execute("SELECT * FROM users")
+    if not c.fetchall():
+        c.execute("INSERT INTO users VALUES ('admin', '123', 'Admin')")
+        c.execute("INSERT INTO users VALUES ('nhanvien', '123', 'Staff')")
+        conn.commit()
 
-# Khởi tạo DB khi chạy app
 init_db()
 
-# ==========================================
-# 2. GIAO DIỆN QUẢN TRỊ (ADMIN DASHBOARD)
-# ==========================================
-st.set_page_config(page_title="Admin Panel - Cửa Hàng Điện Tử", layout="wide")
-st.title("⚙️ Hệ Thống Quản Trị Cửa Hàng (Admin)")
+# 2. HỆ THỐNG ĐĂNG NHẬP (SESSION STATE)
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+    st.session_state['role'] = ''
+    st.session_state['username'] = ''
 
-# Menu bên trái
-menu = st.sidebar.selectbox("Chọn chức năng:", ["🔍 Tra cứu Sản phẩm", "➕ Thêm Sản phẩm mới", "✏️ Chỉnh sửa / Xóa"])
-
-# ------------------------------------------
-# CHỨC NĂNG 1: TRA CỨU
-# ------------------------------------------
-if menu == "🔍 Tra cứu Sản phẩm":
-    st.header("Tra cứu thông tin theo IMEI hoặc Tên")
-    search_term = st.text_input("Nhập mã IMEI hoặc Tên sản phẩm:")
-    
-    if st.button("Tìm kiếm"):
-        query = "SELECT * FROM products WHERE imei LIKE ? OR name LIKE ?"
-        results = run_query(query, (f'%{search_term}%', f'%{search_term}%'))
-        
-        if results:
-            df = pd.DataFrame(results, columns=["ID", "Tên Sản Phẩm", "Số IMEI/Serial", "Giá Bán", "Trạng Thái"])
-            st.dataframe(df, use_container_width=True)
-        else:
-            st.warning("Không tìm thấy sản phẩm nào!")
-            
-    st.markdown("---")
-    st.subheader("Tất cả sản phẩm trong kho")
-    all_data = run_query("SELECT * FROM products")
-    if all_data:
-        df_all = pd.DataFrame(all_data, columns=["ID", "Tên Sản Phẩm", "Số IMEI/Serial", "Giá Bán", "Trạng Thái"])
-        st.dataframe(df_all, use_container_width=True)
-
-# ------------------------------------------
-# CHỨC NĂNG 2: THÊM MỚI (CREATE)
-# ------------------------------------------
-elif menu == "➕ Thêm Sản phẩm mới":
-    st.header("Nhập kho sản phẩm mới")
-    
-    with st.form("add_form"):
-        name = st.text_input("Tên sản phẩm (VD: iPhone 15 Pro Max)")
-        imei = st.text_input("Mã IMEI / Serial (Duy nhất)")
-        price = st.number_input("Giá bán (VNĐ)", min_value=0, step=100000)
-        status = st.selectbox("Trạng thái", ["Còn hàng", "Đã bán", "Đang bảo hành"])
-        
-        submit = st.form_submit_button("Thêm vào Cơ sở dữ liệu")
-        
-        if submit:
-            if name and imei:
-                try:
-                    run_query("INSERT INTO products (name, imei, price, status) VALUES (?, ?, ?, ?)", 
-                              (name, imei, price, status))
-                    st.success(f"Đã thêm thành công: {name} (IMEI: {imei})")
-                except sqlite3.IntegrityError:
-                    st.error("Lỗi: Mã IMEI này đã tồn tại trong hệ thống!")
+if not st.session_state['logged_in']:
+    st.markdown("<h2 style='text-align: center;'>ĐĂNG NHẬP HỆ THỐNG QUẢN TRỊ</h2>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        username = st.text_input("Tên đăng nhập")
+        password = st.text_input("Mật khẩu", type='password')
+        if st.button("Đăng nhập", use_container_width=True):
+            c.execute("SELECT role FROM users WHERE username=? AND password=?", (username, password))
+            user = c.fetchone()
+            if user:
+                st.session_state['logged_in'] = True
+                st.session_state['role'] = user[0]
+                st.session_state['username'] = username
+                st.rerun()
             else:
-                st.error("Vui lòng nhập đầy đủ Tên và IMEI.")
-
-# ------------------------------------------
-# CHỨC NĂNG 3: CHỈNH SỬA / XÓA (UPDATE / DELETE)
-# ------------------------------------------
-elif menu == "✏️ Chỉnh sửa / Xóa":
-    st.header("Cập nhật thông tin sản phẩm")
+                st.error("Sai thông tin! Dùng tài khoản mẫu: admin/123 (quản lý) hoặc nhanvien/123 (nhân viên)")
+else:
+    # 3. GIAO DIỆN QUẢN TRỊ & PHÂN QUYỀN
+    st.sidebar.title(f"Xin chào, {st.session_state['username']}")
+    st.sidebar.markdown(f"**Cấp bậc:** {st.session_state['role']}")
     
-    # Lấy danh sách sản phẩm để chọn
-    all_products = run_query("SELECT id, name, imei FROM products")
-    if not all_products:
-        st.info("Kho dữ liệu đang trống.")
+    # Chia quyền Menu
+    if st.session_state['role'] == 'Admin':
+        menu = ["1. Bán hàng (POS)", "2. Quản lý Kho hàng", "3. Quản lý Khách hàng", "4. Báo cáo & Thống kê", "5. Chuyển đổi dữ liệu (ETL)"]
     else:
-        # Tạo dict để hiển thị tên đẹp trong ô dropdown
-        product_dict = {f"{p[1]} - IMEI: {p[2]} (ID: {p[0]})": p[0] for p in all_products}
-        selected_product = st.selectbox("Chọn sản phẩm cần sửa:", list(product_dict.keys()))
-        
-        product_id = product_dict[selected_product]
-        
-        # Lấy dữ liệu cũ của sản phẩm được chọn
-        current_data = run_query("SELECT name, imei, price, status FROM products WHERE id = ?", (product_id,))[0]
-        
-        with st.form("edit_form"):
-            st.write("Sửa thông tin:")
-            new_name = st.text_input("Tên sản phẩm", value=current_data[0])
-            new_imei = st.text_input("IMEI", value=current_data[1])
-            new_price = st.number_input("Giá bán", value=float(current_data[2]), step=100000.0)
-            
-            # Cài đặt giá trị mặc định cho selectbox
-            status_options = ["Còn hàng", "Đã bán", "Đang bảo hành"]
-            current_status_index = status_options.index(current_data[3]) if current_data[3] in status_options else 0
-            new_status = st.selectbox("Trạng thái", status_options, index=current_status_index)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                update_btn = st.form_submit_button("Lưu thay đổi", type="primary")
-            with col2:
-                delete_btn = st.form_submit_button("Xóa sản phẩm này")
-                
-            if update_btn:
-                try:
-                    run_query("UPDATE products SET name=?, imei=?, price=?, status=? WHERE id=?", 
-                              (new_name, new_imei, new_price, new_status, product_id))
-                    st.success("Đã cập nhật thành công! Vui lòng tải lại trang.")
-                except sqlite3.IntegrityError:
-                    st.error("Lỗi: Mã IMEI bị trùng với sản phẩm khác!")
-                    
-            if delete_btn:
-                run_query("DELETE FROM products WHERE id=?", (product_id,))
-                st.success("Đã xóa sản phẩm thành công! Vui lòng tải lại trang.")
-                # ------------------------------------------
-# CHỨC NĂNG 4: CHUYỂN ĐỔI DỮ LIỆU (ETL)
-# ------------------------------------------
-elif menu == "🔄 Chuyển đổi dữ liệu (ETL)":
-    st.header("Chuyển đổi dữ liệu từ hệ thống cũ")
-    st.info("Tính năng này cho phép Import hàng loạt dữ liệu từ file CSV/Excel cũ vào cơ sở dữ liệu mới, tự động kiểm tra trùng lặp IMEI.")
+        menu = ["1. Bán hàng (POS)", "3. Quản lý Khách hàng"] # Nhân viên không xem được báo cáo và kho
     
-    # Cho phép tải file lên
-    uploaded_file = st.file_uploader("Tải lên file dữ liệu cũ (định dạng .csv)", type=["csv"])
-    
-    # Code tạo file CSV mẫu để bạn tải về test thử
-    st.markdown("*(Hoặc tải [File CSV mẫu tại đây](#) nếu bạn chưa có)*")
-    sample_df = pd.DataFrame({
-        "Ten_SP": ["Samsung Galaxy S24", "MacBook Pro M3", "iPad Air 5"],
-        "Ma_IMEI": ["SAM123456", "MAC987654", "IPA112233"],
-        "Gia": [22000000, 35000000, 15000000],
-        "Trang_thai": ["Còn hàng", "Còn hàng", "Đã bán"]
-    })
-    st.download_button(
-        label="📥 Tải file CSV mẫu để test",
-        data=sample_df.to_csv(index=False).encode('utf-8'),
-        file_name='du_lieu_cu_mau.csv',
-        mime='text/csv',
-    )
+    choice = st.sidebar.radio("Chức năng:", menu)
+    if st.sidebar.button("Đăng xuất"):
+        st.session_state['logged_in'] = False
+        st.rerun()
 
-    if uploaded_file is not None:
-        try:
-            # EXTRACT: Đọc dữ liệu từ file
-            df = pd.read_csv(uploaded_file)
-            st.write("📋 Xem trước dữ liệu từ hệ thống cũ:")
-            st.dataframe(df.head())
+    # --- TÍNH NĂNG 1: BÁN HÀNG (POS) ---
+    if choice == "1. Bán hàng (POS)":
+        st.header("🛒 Hệ Thống Bán Hàng (POS)")
+        st.write("Tạo đơn hàng và tự động trừ kho sản phẩm.")
+        
+        # Chọn khách hàng
+        c.execute("SELECT id, name, phone FROM customers")
+        cust_data = c.fetchall()
+        cust_dict = {f"{row[1]} - {row[2]}": row[0] for row in cust_data}
+        
+        if not cust_dict:
+            st.warning("Chưa có dữ liệu khách hàng. Vui lòng thêm khách hàng trước.")
+        else:
+            selected_cust = st.selectbox("Chọn Khách hàng:", list(cust_dict.keys()))
             
-            if st.button("🚀 Bắt đầu chuyển đổi (Migrate Data)"):
+            # Chọn sản phẩm còn hàng
+            c.execute("SELECT imei, name, price FROM products WHERE status = 'Còn hàng'")
+            prod_data = c.fetchall()
+            prod_dict = {f"IMEI: {row[0]} - {row[1]} ({row[2]:,.0f} VNĐ)": (row[0], row[2]) for row in prod_data}
+            
+            if not prod_dict:
+                st.warning("Kho hiện tại đã hết sản phẩm có sẵn.")
+            else:
+                selected_prod = st.selectbox("Quét / Chọn Mã IMEI Sản phẩm:", list(prod_dict.keys()))
+                
+                if st.button("Thanh toán & Xuất hóa đơn", type="primary"):
+                    cust_id = cust_dict[selected_cust]
+                    imei, price = prod_dict[selected_prod]
+                    date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Cập nhật DB: Thêm đơn hàng + Đổi trạng thái sản phẩm
+                    c.execute("INSERT INTO orders (customer_id, imei, sale_date, total) VALUES (?, ?, ?, ?)", (cust_id, imei, date_now, price))
+                    c.execute("UPDATE products SET status = 'Đã bán' WHERE imei = ?", (imei,))
+                    conn.commit()
+                    st.success(f"Giao dịch thành công! Đã bán IMEI {imei} với giá {price:,.0f} VNĐ.")
+
+    # --- TÍNH NĂNG 2: QUẢN LÝ KHO (ADMIN) ---
+    elif choice == "2. Quản lý Kho hàng":
+        st.header("📦 Quản lý Sản phẩm & Tồn kho")
+        df_products = pd.read_sql_query("SELECT * FROM products", conn)
+        st.dataframe(df_products, use_container_width=True)
+        
+        with st.expander("Thêm sản phẩm mới thủ công"):
+            col1, col2 = st.columns(2)
+            p_name = col1.text_input("Tên sản phẩm")
+            p_imei = col2.text_input("Mã IMEI")
+            p_price = col1.number_input("Giá bán", min_value=0)
+            p_status = col2.selectbox("Trạng thái", ["Còn hàng", "Đã bán", "Lỗi"])
+            if st.button("Lưu sản phẩm"):
+                try:
+                    c.execute("INSERT INTO products (name, imei, price, status) VALUES (?,?,?,?)", (p_name, p_imei, p_price, p_status))
+                    conn.commit()
+                    st.success("Đã thêm vào kho!")
+                    st.rerun()
+                except:
+                    st.error("Mã IMEI đã tồn tại!")
+
+    # --- TÍNH NĂNG 3: KHÁCH HÀNG & BẢO HÀNH ---
+    elif choice == "3. Quản lý Khách hàng":
+        st.header("👥 Hồ sơ Khách hàng & Bảo hành")
+        df_customers = pd.read_sql_query("SELECT * FROM customers", conn)
+        st.dataframe(df_customers, use_container_width=True)
+        
+        st.subheader("Thêm khách hàng mới")
+        c_name = st.text_input("Tên khách hàng")
+        c_phone = st.text_input("Số điện thoại")
+        if st.button("Đăng ký khách hàng"):
+            try:
+                c.execute("INSERT INTO customers (name, phone) VALUES (?,?)", (c_name, c_phone))
+                conn.commit()
+                st.success("Tạo mới thành công!")
+                st.rerun()
+            except:
+                st.error("Số điện thoại này đã được đăng ký!")
+
+    # --- TÍNH NĂNG 4: BÁO CÁO THỐNG KÊ (ADMIN) ---
+    elif choice == "4. Báo cáo & Thống kê":
+        st.header("📊 Báo cáo Kinh doanh")
+        # Dùng pandas join các bảng để báo cáo
+        query = """
+        SELECT orders.sale_date, customers.name, products.name, orders.total 
+        FROM orders 
+        JOIN customers ON orders.customer_id = customers.id
+        JOIN products ON orders.imei = products.imei
+        """
+        df_orders = pd.read_sql_query(query, conn)
+        
+        if not df_orders.empty:
+            total_revenue = df_orders['total'].sum()
+            col1, col2 = st.columns(2)
+            col1.metric("Tổng Doanh Thu", f"{total_revenue:,.0f} VNĐ")
+            col2.metric("Số lượng đơn hàng", len(df_orders))
+            st.dataframe(df_orders, use_container_width=True)
+            st.bar_chart(df_orders.set_index('sale_date')['total'])
+        else:
+            st.info("Chưa có phát sinh giao dịch bán hàng.")
+
+    # --- TÍNH NĂNG 5: ETL (ADMIN) ---
+    elif choice == "5. Chuyển đổi dữ liệu (ETL)":
+        st.header("🔄 Chuyển đổi dữ liệu (ETL)")
+        uploaded_file = st.file_uploader("Tải lên file CSV chứa dữ liệu cũ", type=["csv"])
+        if uploaded_file:
+            df_upload = pd.read_csv(uploaded_file)
+            st.write("Bản xem trước:", df_upload.head())
+            if st.button("Bắt đầu Migrate Data (ETL)"):
                 success_count = 0
-                error_count = 0
-                error_list = []
-                
-                # Biến quá trình (Progress bar) cho sinh động
-                progress_bar = st.progress(0)
-                total_rows = len(df)
-                
-                # TRANSFORM & LOAD: Lặp qua từng dòng để đưa vào DB
-                for index, row in df.iterrows():
+                for index, row in df_upload.iterrows():
                     try:
-                        # Giả sử file có các cột: Ten_SP, Ma_IMEI, Gia, Trang_thai
-                        name = str(row['Ten_SP'])
-                        imei = str(row['Ma_IMEI'])
-                        price = float(row['Gia'])
-                        status = str(row['Trang_thai'])
-                        
-                        run_query("INSERT INTO products (name, imei, price, status) VALUES (?, ?, ?, ?)", 
-                                  (name, imei, price, status))
+                        c.execute("INSERT INTO products (name, imei, price, status) VALUES (?,?,?,?)", 
+                                  (row['name'], row['imei'], row['price'], row['status']))
                         success_count += 1
                     except sqlite3.IntegrityError:
-                        error_count += 1
-                        error_list.append(f"Dòng {index + 1}: IMEI '{imei}' đã tồn tại.")
-                    except Exception as e:
-                        error_count += 1
-                        error_list.append(f"Dòng {index + 1}: Lỗi định dạng dữ liệu.")
-                    
-                    # Cập nhật thanh tiến trình
-                    progress_bar.progress((index + 1) / total_rows)
-                
-                # Hiển thị kết quả báo cáo
-                st.success(f"✅ Đã chuyển đổi thành công: {success_count} sản phẩm.")
-                if error_count > 0:
-                    st.error(f"❌ Có {error_count} sản phẩm bị lỗi (bỏ qua).")
-                    with st.expander("Xem chi tiết lỗi"):
-                        for err in error_list:
-                            st.write(err)
-                            
-        except Exception as e:
-            st.error(f"Đã xảy ra lỗi khi đọc file: {e}. Vui lòng đảm bảo file đúng định dạng CSV.")
+                        pass # Bỏ qua trùng IMEI
+                conn.commit()
+                st.success(f"Hoàn tất! Đã nạp thành công {success_count} sản phẩm mới.")
